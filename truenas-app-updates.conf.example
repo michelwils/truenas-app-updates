@@ -1,0 +1,58 @@
+# truenas-app-updates configuration
+#
+# Copy this file next to the script (truenas-app-updates.conf) or to
+# /etc/truenas-app-updates.conf, then uncomment and adjust what you need.
+# Anything left commented keeps its built-in default.
+#
+# This file is sourced by a root shell. It must not be group- or
+# world-writable; the script refuses to run otherwise. Use: chmod 644
+#
+# Precedence: built-in defaults < this file < environment variables.
+
+# --- paths -------------------------------------------------------------------
+
+# Detailed log. Put it on a data pool, not the boot pool.
+#LOGFILE=/mnt/YOUR_POOL/scripts/logs/app-updates.log
+
+# Lock preventing two overlapping cycles.
+#LOCKFILE=/var/run/truenas-app-updates.lock
+
+# Identifier used for journald entries (journalctl -t ...).
+#TAG=truenas-app-updates
+
+# Log file is rotated once past this size; one previous copy is kept.
+#LOG_MAX_BYTES=5242880
+
+# --- what gets updated -------------------------------------------------------
+
+# Phase 2: refresh Docker images that moved without a catalog version bump
+# (typically "latest" tags). Set to false to handle catalog versions only.
+#PULL_IMAGES=true
+
+# Leave apps in STOPPED state alone — they are probably stopped on purpose.
+#SKIP_STOPPED=true
+
+# Apps never to touch. Anything you cannot afford to have broken
+# unattended belongs here.
+#EXCLUDE=(stalwart nextcloud)
+
+# Same list as a space-separated string. Useful from the environment, where
+# arrays cannot be passed. If set, it replaces EXCLUDE entirely.
+#EXCLUDE_LIST="stalwart nextcloud"
+
+# --- safety and timing -------------------------------------------------------
+
+# ZFS snapshot of host path volumes before each upgrade. Leave false if your
+# periodic snapshot tasks already cover the app datasets. If you set it to
+# true, plan a retention task: these snapshots are never pruned automatically.
+#SNAPSHOT_HOSTPATHS=false
+
+# Maximum seconds per application.
+#UPGRADE_TIMEOUT=1800
+
+# Maximum total cycle duration. Remaining apps are deferred to the next run.
+#GLOBAL_BUDGET=14400
+
+# How long to wait for containers to leave DEPLOYING before judging final state.
+#SETTLE_TIMEOUT=240
+#SETTLE_INTERVAL=10
