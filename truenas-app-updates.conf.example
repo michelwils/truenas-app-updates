@@ -40,6 +40,19 @@
 # arrays cannot be passed. If set, it replaces EXCLUDE entirely.
 #EXCLUDE_LIST="stalwart nextcloud"
 
+# --- notifications -----------------------------------------------------------
+
+# TrueNAS ships no local MTA, so cron cannot deliver a job's output by email.
+# When true, the script hands its summary to the middleware (mail.send), which
+# uses the SMTP settings configured under System Settings -> Email. Set to
+# false to fall back on writing the summary to stdout and letting cron deal
+# with it — which only works if you have installed an MTA yourself.
+#SEND_EMAIL=true
+
+# Space-separated recipients. Leave empty to use the local administrators,
+# which is the middleware's own default.
+#EMAIL_TO="you@example.com"
+
 # --- safety and timing -------------------------------------------------------
 
 # ZFS snapshot of host path volumes before each upgrade. Leave false if your

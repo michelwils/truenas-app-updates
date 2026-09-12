@@ -206,6 +206,26 @@ EXCLUDE_LIST="stalwart nextcloud" /mnt/tank/scripts/truenas-app-updates.sh
 | `PULL_IMAGES` | `true` | Enables phase 2. Set to `false` to handle catalog versions only. |
 | `EXCLUDE` | `()` | Apps never to touch, e.g. `EXCLUDE=(stalwart nextcloud)`. File only. |
 | `EXCLUDE_LIST` | `""` | Same list as a space-separated string, usable from the environment. Replaces `EXCLUDE` when set. |
+| `SEND_EMAIL` | `true` | Send the summary through the middleware's `mail.send`. See below. |
+| `EMAIL_TO` | `""` | Space-separated recipients. Empty means the local administrators. |
+
+### How the summary reaches you
+
+TrueNAS ships no local mail transfer agent. Cron can only deliver a job's
+output by invoking `sendmail`, so **unchecking *Hide Standard Output* is not
+enough on its own** — the output has nowhere to go and is discarded silently.
+Configured SMTP settings and a working test email do not change this; the
+middleware sends its own notifications through its API, not through cron.
+
+With `SEND_EMAIL=true` (the default), the script therefore sends its summary
+itself, via the `mail.send` API method, using the same SMTP settings as every
+other TrueNAS notification. Nothing is written to stdout under cron, so a
+system that *does* have an MTA will not produce a duplicate. When you run the
+script from a terminal, the summary is printed as well.
+
+Set `SEND_EMAIL=false` if you have installed an MTA and would rather let cron
+handle delivery. If `mail.send` fails, the script falls back to stdout and logs
+an error.
 
 ### Command-line options
 
@@ -319,6 +339,9 @@ the better path in that case.
   may be observed as `RUNNING` at check time and slip through.
 - No application-level health check: the script verifies the container is
   running, not that the service actually responds.
+- `mail.send` is queued by the middleware. A failure to actually deliver
+  (bad credentials, SMTP server down) will not be visible to the script; check
+  the TrueNAS alerts.
 - A failed `catalog.sync` produces a `WARN`, hence an email. If your link is
   flaky at cycle time this gets noisy — downgrade that case to `INFO`.
 - `--dry-run` skips `catalog.sync`, so it reports against whatever the catalog

@@ -77,7 +77,7 @@ done
 SETTINGS=(
     LOGFILE LOCKFILE TAG UPGRADE_TIMEOUT SETTLE_TIMEOUT SETTLE_INTERVAL
     LOG_MAX_BYTES SNAPSHOT_HOSTPATHS SKIP_STOPPED PULL_IMAGES GLOBAL_BUDGET
-    EXCLUDE_LIST
+    EXCLUDE_LIST SEND_EMAIL EMAIL_TO
 )
 
 # Capture whatever the environment already provides, before defaults are set.
@@ -101,6 +101,8 @@ PULL_IMAGES=true              # phase 2: refresh images ("latest" tags)
 GLOBAL_BUDGET=14400           # 4 h ceiling for the whole cycle
 EXCLUDE=()                    # apps never to touch, e.g. EXCLUDE=(stalwart)
 EXCLUDE_LIST=""               # same thing as a space-separated string
+SEND_EMAIL=true               # send the summary through mail.send
+EMAIL_TO=""                   # space-separated; empty = local administrators
 
 # --- configuration file ------------------------------------------------------
 if [ -z "$CONFIG" ]; then
@@ -173,8 +175,7 @@ log() {
     esac
 }
 
-emit_summary() {
-    [ -z "$NOTIF" ] && return 0
+build_summary() {
     echo "TrueNAS applications — $(hostname) — $(date '+%Y-%m-%d %H:%M')"
     [ "$DRY_RUN" = true ] && echo "(dry run — nothing was changed)"
     echo
@@ -183,6 +184,42 @@ emit_summary() {
     echo "Details: $LOGFILE   (or: journalctl -t $TAG --since today)"
     echo "Rollback: midclt call app.rollback_versions NAME"
     echo "          midclt call --job app.rollback NAME '{\"app_version\":\"X.Y.Z\"}'"
+}
+
+# TrueNAS ships no local MTA, so cron cannot deliver a job's output. Hand the
+# summary to the middleware instead, which uses the configured SMTP settings.
+send_mail() {
+    local subject=$1 body=$2 payload recipients
+    recipients=$(printf '%s\n' $EMAIL_TO | jq -R . | jq -sc 'map(select(length > 0))')
+    payload=$(jq -n --arg s "$subject" --arg t "$body" --argjson to "$recipients" \
+        '{subject: $s, text: $t, html: null}
+         + (if ($to | length) > 0 then {to: $to} else {} end)') || return 1
+    timeout 120 midclt call --job mail.send "$payload" >/dev/null 2>>"$LOGFILE"
+}
+
+emit_summary() {
+    [ -z "$NOTIF" ] && return 0
+
+    local body subject
+    body=$(build_summary)
+    if printf '%s' "$NOTIF" | grep -q '^\[ERROR\]'; then
+        subject="[ERROR] TrueNAS app updates on $(hostname)"
+    else
+        subject="TrueNAS app updates on $(hostname)"
+    fi
+
+    if [ "$SEND_EMAIL" = true ]; then
+        if send_mail "$subject" "$body"; then
+            log INFO "Summary emailed via mail.send"
+            # Also show it when run from a terminal; stays silent under cron so
+            # that a working MTA would not produce a second copy.
+            [ -t 1 ] && printf '%s\n' "$body"
+            return 0
+        fi
+        log ERROR "mail.send failed — falling back to stdout"
+    fi
+
+    printf '%s\n' "$body"
 }
 
 # ------------------------------------------------------------------- lock
