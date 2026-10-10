@@ -66,6 +66,17 @@
 # Maximum total cycle duration. Remaining apps are deferred to the next run.
 #GLOBAL_BUDGET=14400
 
+# Pause after each app, to ease registry rate limits (Docker Hub, ghcr.io).
+#APP_PAUSE=30
+
+# Extra tries and delay (seconds) when an upgrade or pull is refused by a
+# registry rate limit.
+#RETRY_ATTEMPTS=3
+#RETRY_DELAY=180
+
+# Restart an app that was RUNNING if a failed update left it STOPPED.
+#RESTART_ON_FAILURE=true
+
 # How long to wait for containers to leave DEPLOYING before judging final state.
 #SETTLE_TIMEOUT=240
 #SETTLE_INTERVAL=10

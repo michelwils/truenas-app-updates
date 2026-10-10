@@ -202,6 +202,10 @@ EXCLUDE_LIST="stalwart nextcloud" /mnt/tank/scripts/truenas-app-updates.sh
 | `SETTLE_TIMEOUT` | `240` | Maximum wait for containers to settle before judging final state. |
 | `GLOBAL_BUDGET` | `14400` | Maximum total cycle duration. Remaining apps are deferred to the next run. |
 | `SNAPSHOT_HOSTPATHS` | `false` | ZFS snapshot of host paths before each upgrade. Set to `true` if you do not already have periodic snapshots covering your app datasets. |
+| `APP_PAUSE` | `30` | Seconds to wait after each app, to ease registry rate limits. |
+| `RETRY_ATTEMPTS` | `3` | Extra tries (image pull + redeploy) when the registry answers with a rate limit. |
+| `RETRY_DELAY` | `180` | Seconds to wait before each of those tries. |
+| `RESTART_ON_FAILURE` | `true` | Restart an app that was `RUNNING` when its update failed and left it `STOPPED`. |
 | `SKIP_STOPPED` | `true` | Leave apps in `STOPPED` state alone — they are probably stopped on purpose. |
 | `PULL_IMAGES` | `true` | Enables phase 2. Set to `false` to handle catalog versions only. |
 | `EXCLUDE` | `()` | Apps never to touch, e.g. `EXCLUDE=(stalwart nextcloud)`. File only. |

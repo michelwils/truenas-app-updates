@@ -77,7 +77,8 @@ done
 SETTINGS=(
     LOGFILE LOCKFILE TAG UPGRADE_TIMEOUT SETTLE_TIMEOUT SETTLE_INTERVAL
     LOG_MAX_BYTES SNAPSHOT_HOSTPATHS SKIP_STOPPED PULL_IMAGES GLOBAL_BUDGET
-    EXCLUDE_LIST SEND_EMAIL EMAIL_TO
+    EXCLUDE_LIST SEND_EMAIL EMAIL_TO APP_PAUSE RETRY_ATTEMPTS RETRY_DELAY
+    RESTART_ON_FAILURE
 )
 
 # Capture whatever the environment already provides, before defaults are set.
@@ -99,6 +100,10 @@ SNAPSHOT_HOSTPATHS=false      # ZFS snapshot of host paths before each upgrade
 SKIP_STOPPED=true             # do not wake up deliberately stopped apps
 PULL_IMAGES=true              # phase 2: refresh images ("latest" tags)
 GLOBAL_BUDGET=14400           # 4 h ceiling for the whole cycle
+APP_PAUSE=30                  # seconds to wait after each app, to ease registry rate limits
+RETRY_ATTEMPTS=3              # extra tries when the registry answers "rate limit"
+RETRY_DELAY=180               # seconds between those tries
+RESTART_ON_FAILURE=true       # restart an app that was RUNNING if its update left it stopped
 EXCLUDE=()                    # apps never to touch, e.g. EXCLUDE=(stalwart)
 EXCLUDE_LIST=""               # same thing as a space-separated string
 SEND_EMAIL=true               # send the summary through mail.send
@@ -278,6 +283,32 @@ budget_exhausted() {
     return 1
 }
 
+# Registry rate limits (Docker Hub, ghcr.io) are transient. When an upgrade or
+# image pull fails because of one, the new config is usually already applied, so
+# the retry only has to pull the images and redeploy. $1 = app. Reads the last
+# error from $JOB_ERR; returns 0 once a retry succeeds.
+is_rate_limited() { grep -qiE 'rate limit|toomanyrequests' "$JOB_ERR" 2>/dev/null; }
+
+retry_after_rate_limit() {
+    local app=$1 i
+    for ((i = 1; i <= RETRY_ATTEMPTS; i++)); do
+        is_rate_limited || return 1
+        budget_exhausted && return 1
+        log WARN "$app — registry rate limit, retry $i/$RETRY_ATTEMPTS in ${RETRY_DELAY}s"
+        sleep "$RETRY_DELAY"
+        timeout "$UPGRADE_TIMEOUT" \
+            midclt call --job app.pull_images "$app" '{"redeploy": true}' \
+            >/dev/null 2>"$JOB_ERR"
+        local rc=$?
+        cat "$JOB_ERR" >>"$LOGFILE"
+        [ "$rc" -eq 0 ] && return 0
+    done
+    return 1
+}
+
+JOB_ERR=$(mktemp)
+trap 'rm -f "$JOB_ERR"' EXIT
+
 # ------------------------------------------------------------------- inventory
 log INFO "=== Cycle started ===${CONFIG:+ (config: $CONFIG)}${DRY_RUN:+}"
 [ "$DRY_RUN" = true ] && log INFO "Dry run — no changes will be made"
@@ -315,6 +346,7 @@ APPS=(${SELECTED[@]+"${SELECTED[@]}"})
 log INFO "Phase 1 — ${#STATE_BEFORE[@]} apps in inventory, ${#CANDIDATES[@]} candidates, ${#APPS[@]} selected"
 
 UPGRADED=()
+FAILED=()
 for app in ${APPS[@]+"${APPS[@]}"}; do
     if budget_exhausted; then
         log ERROR "Budget of ${GLOBAL_BUDGET}s exhausted — $app and the rest deferred"
@@ -331,8 +363,14 @@ for app in ${APPS[@]+"${APPS[@]}"}; do
     timeout "$UPGRADE_TIMEOUT" \
         midclt call --job app.upgrade "$app" \
         "{\"app_version\":\"latest\",\"snapshot_hostpaths\":$SNAPSHOT_HOSTPATHS}" \
-        >/dev/null 2>>"$LOGFILE"
+        >/dev/null 2>"$JOB_ERR"
     rc=$?
+    cat "$JOB_ERR" >>"$LOGFILE"
+
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && retry_after_rate_limit "$app"; then
+        log INFO "$app — upgrade completed after a rate-limit retry"
+        rc=0
+    fi
 
     if [ "$rc" -eq 0 ]; then
         UPGRADED+=("$app")
@@ -341,7 +379,9 @@ for app in ${APPS[@]+"${APPS[@]}"}; do
         log ERROR "$app — timed out after ${UPGRADE_TIMEOUT}s; the middleware job may still be running"
     else
         log ERROR "$app — upgrade failed (exit $rc), still on $before"
+        FAILED+=("$app")
     fi
+    sleep "$APP_PAUSE"
 done
 
 # ------------------------------------------------------------------- phase 2
@@ -384,8 +424,13 @@ if [ "$PULL_IMAGES" = true ]; then
         log INFO "Refreshing images for $app${images:+ : $images}"
         timeout "$UPGRADE_TIMEOUT" \
             midclt call --job app.pull_images "$app" '{"redeploy": true}' \
-            >/dev/null 2>>"$LOGFILE"
+            >/dev/null 2>"$JOB_ERR"
         rc=$?
+        cat "$JOB_ERR" >>"$LOGFILE"
+
+        if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && retry_after_rate_limit "$app"; then
+            rc=0
+        fi
 
         if [ "$rc" -eq 0 ]; then
             TOUCHED+=("$app")
@@ -394,7 +439,9 @@ if [ "$PULL_IMAGES" = true ]; then
             log ERROR "$app — timed out while pulling images"
         else
             log ERROR "$app — image refresh failed (exit $rc)"
+            FAILED+=("$app")
         fi
+        sleep "$APP_PAUSE"
     done
 fi
 
@@ -403,6 +450,24 @@ if [ "$DRY_RUN" = true ]; then
     log INFO "=== Dry run finished (${SECONDS}s) ==="
     emit_summary
     exit 0
+fi
+
+# ------------------------------------------------------------------- recovery
+# A failed update stops the app before the pull. If it was RUNNING, bring it
+# back (on its previous images if the new ones could not be pulled).
+if [ "$RESTART_ON_FAILURE" = true ]; then
+    AFTER_FAIL=$(query_all) || AFTER_FAIL="[]"
+    for app in ${FAILED[@]+"${FAILED[@]}"}; do
+        [ "${STATE_BEFORE[$app]:-}" = "RUNNING" ] || continue
+        [ "$(field_of "$AFTER_FAIL" "$app" state)" = "STOPPED" ] || continue
+        log WARN "$app — stopped by the failed update, restarting"
+        if timeout "$UPGRADE_TIMEOUT" midclt call --job app.start "$app" \
+            >/dev/null 2>>"$LOGFILE"; then
+            TOUCHED+=("$app")
+        else
+            log ERROR "$app — restart failed, manual action needed"
+        fi
+    done
 fi
 
 # ------------------------------------------------------------------- settle
