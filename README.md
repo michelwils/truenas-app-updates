@@ -61,7 +61,7 @@ it in `EXCLUDE` and handle it by hand.
 
 ## How it works
 
-Each cycle runs in two distinct phases.
+Each cycle runs in three distinct phases.
 
 **Phase 1 — `app.upgrade`.** Applications for which the TrueNAS catalog reports
 a newer version (`upgrade_available`) are upgraded to `latest`. Versions before
@@ -78,12 +78,22 @@ the state of **every** application against the snapshot taken at the start of th
 cycle. An app that was running before and is not running after is reported as an
 error.
 
+**Phase 3 — image cleanup.** Updates leave the superseded images on disk. For
+each image repository the script keeps the newest `KEEP_IMAGE_VERSIONS` images
+(default 2: the current one and its predecessor) and removes the others. Images
+used by any container, running or stopped, are never removed and count towards
+the quota. A repository with no more than `KEEP_IMAGE_VERSIONS` images is left
+alone, which spares locally built images. Untagged images that belong to no
+repository are pruned, as `docker image prune` would. Set `CLEANUP_IMAGES=false`
+to disable this phase. Anything older than the previous version has to be pulled
+again by hand if you need it.
+
 ### Log levels
 
 | Level   | Contents | Emailed |
 |---------|----------|---------|
 | `INFO`  | Normal progress, skipped apps and why, catalog sync | no |
-| `WARN`  | An application was upgraded or redeployed | yes |
+| `WARN`  | An application was upgraded or redeployed, old images were removed | yes |
 | `ERROR` | Failure, timeout, state regression, middleware unreachable | yes |
 
 Everything is written to the log file and to journald regardless of level. Only
@@ -208,6 +218,8 @@ EXCLUDE_LIST="stalwart nextcloud" /mnt/tank/scripts/truenas-app-updates.sh
 | `RESTART_ON_FAILURE` | `true` | Restart an app that was `RUNNING` when its update failed and left it `STOPPED`. |
 | `SKIP_STOPPED` | `true` | Leave apps in `STOPPED` state alone — they are probably stopped on purpose. |
 | `PULL_IMAGES` | `true` | Enables phase 2. Set to `false` to handle catalog versions only. |
+| `CLEANUP_IMAGES` | `true` | Enables phase 3: remove old Docker images at the end of the cycle. |
+| `KEEP_IMAGE_VERSIONS` | `2` | Images kept per repository by phase 3: the current one and the previous ones. Must be a positive integer. |
 | `EXCLUDE` | `()` | Apps never to touch, e.g. `EXCLUDE=(stalwart nextcloud)`. File only. |
 | `EXCLUDE_LIST` | `""` | Same list as a space-separated string, usable from the environment. Replaces `EXCLUDE` when set. |
 | `SEND_EMAIL` | `true` | Send the summary through the middleware's `mail.send`. See below. |

@@ -29,6 +29,13 @@
 # (typically "latest" tags). Set to false to handle catalog versions only.
 #PULL_IMAGES=true
 
+# Phase 3: at the end of the cycle, remove old Docker images and keep only the
+# newest KEEP_IMAGE_VERSIONS of each repository (2 = current + previous).
+# Images used by a container are never removed. Anything older has to be pulled
+# again by hand.
+#CLEANUP_IMAGES=true
+#KEEP_IMAGE_VERSIONS=2
+
 # Leave apps in STOPPED state alone — they are probably stopped on purpose.
 #SKIP_STOPPED=true
 

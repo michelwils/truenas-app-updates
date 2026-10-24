@@ -78,7 +78,7 @@ SETTINGS=(
     LOGFILE LOCKFILE TAG UPGRADE_TIMEOUT SETTLE_TIMEOUT SETTLE_INTERVAL
     LOG_MAX_BYTES SNAPSHOT_HOSTPATHS SKIP_STOPPED PULL_IMAGES GLOBAL_BUDGET
     EXCLUDE_LIST SEND_EMAIL EMAIL_TO APP_PAUSE RETRY_ATTEMPTS RETRY_DELAY
-    RESTART_ON_FAILURE
+    RESTART_ON_FAILURE CLEANUP_IMAGES KEEP_IMAGE_VERSIONS
 )
 
 # Capture whatever the environment already provides, before defaults are set.
@@ -104,6 +104,8 @@ APP_PAUSE=30                  # seconds to wait after each app, to ease registry
 RETRY_ATTEMPTS=3              # extra tries when the registry answers "rate limit"
 RETRY_DELAY=180               # seconds between those tries
 RESTART_ON_FAILURE=true       # restart an app that was RUNNING if its update left it stopped
+CLEANUP_IMAGES=true           # phase 3: remove old Docker images after the cycle
+KEEP_IMAGE_VERSIONS=2         # images kept per repository: current + previous
 EXCLUDE=()                    # apps never to touch, e.g. EXCLUDE=(stalwart)
 EXCLUDE_LIST=""               # same thing as a space-separated string
 SEND_EMAIL=true               # send the summary through mail.send
@@ -306,6 +308,85 @@ retry_after_rate_limit() {
     return 1
 }
 
+# Phase 3 — keep only the newest KEEP_IMAGE_VERSIONS images of each repository
+# (the current one and its predecessor), so that updates do not pile up on the
+# pool. Images used by any container, running or stopped, are never removed and
+# count towards the quota. A repository with at most KEEP_IMAGE_VERSIONS images
+# is left untouched, which spares locally built images. Untagged images that
+# belong to no repository are removed like `docker image prune` would.
+cleanup_images() {
+    local keep=$KEEP_IMAGE_VERSIONS id repo created
+    local removed=0 failed=0 dangling
+
+    if ! [[ "$keep" =~ ^[1-9][0-9]*$ ]]; then
+        log WARN "KEEP_IMAGE_VERSIONS must be a positive integer (got '$keep'), image cleanup skipped"
+        return 0
+    fi
+    if ! docker info >/dev/null 2>>"$LOGFILE"; then
+        log WARN "docker unreachable, image cleanup skipped"
+        return 0
+    fi
+
+    local -A in_use=() seen=()
+    while read -r id; do
+        [ -n "$id" ] && in_use["$id"]=1
+    done < <(docker ps -aq --no-trunc 2>>"$LOGFILE" |
+        xargs -r docker container inspect --format '{{.Image}}' 2>>"$LOGFILE")
+
+    # repository <TAB> epoch <TAB> created <TAB> id, newest first within a
+    # repository. The repository comes from the first tag, or from the digest
+    # for an image whose tag moved on to a newer one. "Created" carries a UTC
+    # offset that changes with DST, hence the conversion to epoch for sorting.
+    local rows raw epoch
+    raw=$(docker image ls -aq --no-trunc 2>>"$LOGFILE" | sort -u |
+        xargs -r docker image inspect 2>>"$LOGFILE" |
+        jq -r '.[] | [((.RepoTags[0] // .RepoDigests[0] // "")
+                       | sub("@.*$"; "") | sub(":[^/]*$"; "")
+                       | if . == "" then "<none>" else . end),
+                      .Created, .Id] | @tsv') || {
+        log WARN "cannot list Docker images, cleanup skipped"
+        return 0
+    }
+    rows=""
+    while IFS=$'\t' read -r repo created id; do
+        [ -n "$id" ] || continue
+        epoch=$(date -d "$created" +%s 2>/dev/null) || epoch=0
+        rows+="$repo"$'\t'"$epoch"$'\t'"$created"$'\t'"$id"$'\n'
+    done <<<"$raw"
+    rows=$(printf '%s' "$rows" | sort -t$'\t' -k1,1 -k2,2nr)
+
+    while IFS=$'\t' read -r repo epoch created id; do
+        [ -z "$repo" ] || [ "$repo" = "<none>" ] && continue
+        seen["$repo"]=$((${seen["$repo"]:-0} + 1))
+        [ "${seen["$repo"]}" -le "$keep" ] && continue
+        [ -n "${in_use[$id]:-}" ] && continue
+
+        if [ "$DRY_RUN" = true ]; then
+            log WARN "image $repo ($id, created $created) would be removed"
+            removed=$((removed + 1))
+        elif docker image rm "$id" >/dev/null 2>>"$LOGFILE"; then
+            log INFO "Removed old image $repo ($id, created $created)"
+            removed=$((removed + 1))
+        else
+            log INFO "Could not remove image $repo ($id), left in place"
+            failed=$((failed + 1))
+        fi
+    done <<<"$rows"
+
+    if [ "$DRY_RUN" = true ]; then
+        dangling=$(docker image ls -q -f dangling=true 2>>"$LOGFILE" | sort -u | wc -l)
+        [ "$dangling" -gt 0 ] && log WARN "$dangling untagged images would be pruned"
+        return 0
+    fi
+
+    docker image prune -f >/dev/null 2>>"$LOGFILE" ||
+        log INFO "docker image prune failed"
+
+    [ "$removed" -gt 0 ] && log WARN "Image cleanup: $removed old images removed (kept $keep per repository)"
+    [ "$failed" -gt 0 ] && log INFO "Image cleanup: $failed images could not be removed"
+    return 0
+}
+
 JOB_ERR=$(mktemp)
 trap 'rm -f "$JOB_ERR"' EXIT
 
@@ -447,6 +528,7 @@ fi
 
 # ------------------------------------------------------------------- dry run stops here
 if [ "$DRY_RUN" = true ]; then
+    [ "$CLEANUP_IMAGES" = true ] && cleanup_images
     log INFO "=== Dry run finished (${SECONDS}s) ==="
     emit_summary
     exit 0
@@ -512,6 +594,9 @@ while IFS=$'\t' read -r name state; do
         log ERROR "$name is no longer running: RUNNING -> $state"
     fi
 done < <(printf '%s' "$AFTER" | jq -r '.[] | [.name, .state] | @tsv')
+
+# ------------------------------------------------------------------- phase 3
+[ "$CLEANUP_IMAGES" = true ] && cleanup_images
 
 log INFO "=== Cycle finished (${SECONDS}s) ==="
 emit_summary
